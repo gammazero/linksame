@@ -5,7 +5,7 @@ Replace identical files with links to one file
 
 ## Command-line utility
 
-The `lnsame` command is the command-line utility that provides functionality to links identical files in a directory tree.
+The `lnsame` command is a command-line utility that replaces finds identical files and replaces these with links to a single instance of the file.
 
 ## Library
 
