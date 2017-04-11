@@ -5,13 +5,6 @@ Search recursively through the top level directory to find identical files.
 For each set of identical files, keep only the file with the longest name and
 replace all other copies with hardlinks or symlinks to the longest-named file.
 
-The use of hardlinks or symlinks can be specified; the default is hardlinks.
-Symlinks will be used when hardlinks fail.
-
-Use of relative (the default) or absolute symlink can be specified.  Generally,
-relative symlinks are preferred as this permits links to maintain their
-validity regardless of the mount point used for the file system.
-
 This is useful when there are multiple copies of files in different in
 different locations of a directory tree, and all copies of each file should
 remain identical.  Converting all the files into links to the same file ensures
@@ -47,9 +40,30 @@ import (
 	"syscall"
 )
 
-// LinkSame links identical files in the specified directory tree.
+// LinkSame replaces copies of files with links to a single file.
+//
+// Search all regular files in the directory tree rooted at root, and matching
+// pattern if specified.  Hardlinks are created by default; symlinks are
+// requested by setting symlinks = true.  Symlinks are used if hardlinks fail.
+//
+// Relative (default) or absolute symlinks can be specified.  Generally,
+// relative symlinks are preferred as this permits links to maintain their
+// validity regardless of the mount point used for the file system.
+//
+// If safe mode is enabled, then links are only created for files that have
+// same permission and ownership.
+//
+// Specify quiet (q = true) to suppress output for individual link creation,
+// and silent (qq = true) to suppress output about total links and size saved.
 func LinkSame(root, pattern string, link, symlink, absolute, safe, q, qq bool) error {
 	rootDir := path.Clean(root)
+	rootInfo, err := os.Stat(rootDir)
+	if err != nil {
+		return err
+	}
+	if !rootInfo.IsDir() {
+		return fmt.Errorf("%s is not a directory", rootDir)
+	}
 	if !q {
 		fmt.Println("Linking identical files in", rootDir)
 	}
@@ -57,7 +71,7 @@ func LinkSame(root, pattern string, link, symlink, absolute, safe, q, qq bool) e
 	// Walk directory and create map that maps a size to the list of all files
 	// of that size.  Only keep lists of files that have more than one file.
 	sizeFileMap := map[int64][]string{}
-	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return nil
@@ -129,31 +143,41 @@ func LinkSame(root, pattern string, link, symlink, absolute, safe, q, qq bool) e
 	return nil
 }
 
-// LinkSameUpdate takes a single file and links files in the specified
-// directory tree that are identical to it.
+// LinkSameUpdate replaces copies of a file with links to a single file.
+//
+// Other then the updateFile parameter, all other parameter are that same as
+// for LinkSame()
 func LinkSameUpdate(updateFile, root, pattern string, link, symlink, absolute, safe, q, qq bool) error {
 	if updateFile == "" {
 		return errors.New("Update file not specified")
 	}
 	rootDir := path.Clean(root)
-	if !q {
-		fmt.Println("Linking identical files in", rootDir)
+	rootInfo, err := os.Stat(rootDir)
+	if err != nil {
+		return err
 	}
-
+	if !rootInfo.IsDir() {
+		return fmt.Errorf("%s is not a directory", rootDir)
+	}
 	updateInfo, err := os.Stat(updateFile)
 	if err != nil {
 		return err
 	}
+	if !updateInfo.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a file", updateFile)
+	}
 	if updateInfo.Size() == 0 {
-		return errors.New("Update file is empty")
+		return fmt.Errorf("%s is empty", updateFile)
 	}
 	updateHash, err := hashFile(updateFile)
 	if err != nil {
 		return err
 	}
+	if !q {
+		fmt.Println("Linking", updateFile, "to identical files in", rootDir)
+	}
 
-	// Walk directory and create map that maps a size to the list of all files
-	// of that size.  Only keep lists of files that have more than one file.
+	// Walk directory and find files that are identical to the update file.
 	same := []string{updateFile}
 	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -333,7 +357,7 @@ func linkFiles(files []string, rootDir string, link, symlink, absolute, safe, q 
 		}
 
 		if err = os.Remove(f); err != nil {
-			fmt.Fprintln(os.Stderr, "cannot unlink file:", f)
+			fmt.Fprintln(os.Stderr, "cannot remove file:", f)
 			continue
 		}
 
