@@ -111,10 +111,13 @@ func LinkSame(roots []string, pattern string, writeLinks, symlink, absolute, saf
 		go func(filePaths []string) {
 			var links int
 			var saved int64
-			sameLists := checkSame(filePaths)
-			for j := range sameLists {
-				l, s := linkFiles(sameLists[j], writeLinks, symlink, absolute,
-					safe, verbose)
+			hashMap := createHashMap(filePaths)
+			for _, files := range hashMap {
+				if len(files) < 2 {
+					continue
+				}
+				l, s := linkFiles(files, writeLinks, symlink, absolute, safe,
+					verbose)
 				links += l
 				saved += s
 			}
@@ -307,24 +310,53 @@ func hashFile(file string) (string, error) {
 	return string(h.Sum(nil)), nil
 }
 
-// checkSame returns sets of identical files.
-func checkSame(filepaths []string) [][]string {
-	hashFileMap := make(map[string][]string, len(filepaths))
-	for _, fpath := range filepaths {
-		h, err := hashFile(fpath)
+// createHashMap returns a map of sha1 hash to a slice of identical files.
+func createHashMap(fpaths []string) map[string][]string {
+	var sameAs []string
+	hashMap := make(map[string][]string, len(fpaths))
+	for i := range fpaths {
+		if fpaths[i] == "" {
+			continue
+		}
+		f1Info, err := os.Stat(fpaths[i])
+		if err != nil {
+			// Cannot stat file, maybe removed, so skip.
+			continue
+		}
+
+		// Calculate sha1 hash of file.
+		h, err := hashFile(fpaths[i])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			continue
 		}
-		hashFileMap[h] = append(hashFileMap[h], fpath)
-	}
-	var sames [][]string
-	for _, files := range hashFileMap {
-		if len(files) > 1 {
-			sames = append(sames, files)
+
+		// Find hardlinks to current file, and resue hash for these.
+		for j := i + 1; j < len(fpaths); j++ {
+			if fpaths[j] == "" {
+				continue
+			}
+			f2Info, err := os.Stat(fpaths[j])
+			if err != nil {
+				// Cannot stat file, maybe removed, so mark as bad.
+				fpaths[j] = ""
+				continue
+			}
+			if os.SameFile(f1Info, f2Info) {
+				sameAs = append(sameAs, fpaths[j])
+				fpaths[j] = ""
+			}
+		}
+
+		if len(sameAs) == 0 {
+			hashMap[h] = append(hashMap[h], fpaths[i])
+		} else {
+			// Reuse hash for additional hardlinked files.
+			hashMap[h] = append(hashMap[h], append(sameAs, fpaths[i])...)
+			sameAs = nil
 		}
 	}
-	return sames
+	return hashMap
 }
 
 // linkFiles links the files in the given list, which have been determined to
