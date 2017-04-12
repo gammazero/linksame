@@ -1,7 +1,7 @@
 /*
 Replace identical files with links to one file.
 
-Search recursively through the top level directory to find identical files.
+Search recursively through one or more directory trees to find identical files.
 For each set of identical files, keep only the file with the longest name and
 replace all other copies with hardlinks or symlinks to the longest-named file.
 
@@ -37,14 +37,16 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 )
 
 // LinkSame replaces copies of files with links to a single file.
 //
-// Search all regular files in the directory tree rooted at root, and matching
-// pattern if specified.  Hardlinks are created by default; symlinks are
-// requested by setting symlinks = true.  Symlinks are used if hardlinks fail.
+// Search all regular files in the specified directory trees, with names
+// matching pattern if specified.  Hardlinks are created by default; symlinks
+// are requested by setting symlinks = true.  Symlinks are used if hardlinks
+// fail.
 //
 // Relative (default) or absolute symlinks can be specified.  Generally,
 // relative symlinks are preferred as this permits links to maintain their
@@ -53,48 +55,45 @@ import (
 // If safe mode is enabled, then links are only created for files that have
 // same permission and ownership.
 //
-// Specify quiet (q = true) to suppress output for individual link creation,
-// and silent (qq = true) to suppress output about total links and size saved.
-func LinkSame(root, pattern string, link, symlink, absolute, safe, q, qq bool) error {
-	rootDir := path.Clean(root)
-	rootInfo, err := os.Stat(rootDir)
+// Set quiet to suppress output about links created and size saved.  Set
+// verbose to print output about individual link creation.
+func LinkSame(roots []string, pattern string, writeLinks, symlink, absolute, safe, quiet, verbose bool) error {
+	roots, err := normalizeRoots(roots, quiet)
 	if err != nil {
-		return err
+		return nil
 	}
-	if !rootInfo.IsDir() {
-		return fmt.Errorf("%s is not a directory", rootDir)
-	}
-	if !q {
-		fmt.Println("Linking identical files in", rootDir)
+	if !quiet {
+		fmt.Println("Linking identical files in", strings.Join(roots, ", "))
 	}
 
-	// Walk directory and create map that maps a size to the list of all files
-	// of that size.  Only keep lists of files that have more than one file.
+	// Walk directories and create map that maps a size to the list of all
+	// files of that size.  Only keep lists of files with more than one file.
 	sizeFileMap := map[int64][]string{}
-	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil
-		}
-		if !info.Mode().IsRegular() || info.Size() == 0 {
-			return nil
-		}
-		if pattern != "" {
-			ok, err := filepath.Match(pattern, info.Name())
+	for _, rootDir := range roots {
+		err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return err
-			}
-			if !ok {
+				fmt.Fprintln(os.Stderr, err)
 				return nil
 			}
+			if !info.Mode().IsRegular() || info.Size() == 0 {
+				return nil
+			}
+			if pattern != "" {
+				ok, err := filepath.Match(pattern, info.Name())
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return nil
+				}
+			}
+			sizeFileMap[info.Size()] = append(sizeFileMap[info.Size()], path)
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		sizeFileMap[info.Size()] = append(sizeFileMap[info.Size()], path)
-		return nil
-	})
-	if err != nil {
-		return err
 	}
-
 	type stats struct {
 		links int
 		saved int64
@@ -114,8 +113,8 @@ func LinkSame(root, pattern string, link, symlink, absolute, safe, q, qq bool) e
 			var saved int64
 			sameLists := checkSame(filePaths)
 			for j := range sameLists {
-				l, s := linkFiles(sameLists[j], rootDir, link, symlink,
-					absolute, safe, q)
+				l, s := linkFiles(sameLists[j], writeLinks, symlink, absolute,
+					safe, verbose)
 				links += l
 				saved += s
 			}
@@ -132,9 +131,9 @@ func LinkSame(root, pattern string, link, symlink, absolute, safe, q, qq bool) e
 		sizeSaved += s.saved
 	}
 
-	if !qq {
+	if !quiet {
 		fmt.Println()
-		if !link {
+		if !writeLinks {
 			fmt.Println("If writing links (-w), would have...")
 		}
 		fmt.Println("Replaced", linkCount, "files with links")
@@ -147,17 +146,13 @@ func LinkSame(root, pattern string, link, symlink, absolute, safe, q, qq bool) e
 //
 // Other then the updateFile parameter, all other parameter are that same as
 // for LinkSame()
-func LinkSameUpdate(updateFile, root, pattern string, link, symlink, absolute, safe, q, qq bool) error {
+func LinkSameUpdate(updateFile string, roots []string, pattern string, writeLinks, symlink, absolute, safe, quiet, verbose bool) error {
 	if updateFile == "" {
 		return errors.New("Update file not specified")
 	}
-	rootDir := path.Clean(root)
-	rootInfo, err := os.Stat(rootDir)
+	roots, err := normalizeRoots(roots, quiet)
 	if err != nil {
 		return err
-	}
-	if !rootInfo.IsDir() {
-		return fmt.Errorf("%s is not a directory", rootDir)
 	}
 	updateInfo, err := os.Stat(updateFile)
 	if err != nil {
@@ -173,60 +168,102 @@ func LinkSameUpdate(updateFile, root, pattern string, link, symlink, absolute, s
 	if err != nil {
 		return err
 	}
-	if !q {
-		fmt.Println("Linking", updateFile, "to identical files in", rootDir)
+	if !quiet {
+		fmt.Println("Linking", updateFile, "to identical files in",
+			strings.Join(roots, ", "))
 	}
 
-	// Walk directory and find files that are identical to the update file.
+	// Walk directories and find files that are identical to the update file.
 	same := []string{updateFile}
-	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil
-		}
-		if !info.Mode().IsRegular() || info.Size() != updateInfo.Size() {
-			return nil
-		}
-		if pattern != "" {
-			ok, err := filepath.Match(pattern, info.Name())
+	for _, rootDir := range roots {
+		err = filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return err
-			}
-			if !ok {
+				fmt.Fprintln(os.Stderr, err)
 				return nil
 			}
-		}
-		h, err := hashFile(path)
+			if !info.Mode().IsRegular() || info.Size() != updateInfo.Size() {
+				return nil
+			}
+			if pattern != "" {
+				ok, err := filepath.Match(pattern, info.Name())
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return nil
+				}
+			}
+			h, err := hashFile(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return nil
+			}
+			if h != updateHash {
+				return nil
+			}
+			same = append(same, path)
+			return nil
+		})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return nil
+			return err
 		}
-		if h != updateHash {
-			return nil
-		}
-		same = append(same, path)
-		return nil
-	})
-	if err != nil {
-		return err
 	}
-
 	var linkCount int
 	var sizeSaved int64
 	if len(same) > 1 {
-		linkCount, sizeSaved = linkFiles(same, rootDir, link, symlink,
-			absolute, safe, q)
+		linkCount, sizeSaved = linkFiles(same, writeLinks, symlink, absolute, safe,
+			verbose)
 	}
 
-	if !qq {
+	if !quiet {
 		fmt.Println()
-		if !link {
+		if !writeLinks {
 			fmt.Println("If writing links (-w), would have...")
 		}
 		fmt.Println("Replaced", linkCount, "files with links")
 		fmt.Println("Reduced storage by", sizeStr(sizeSaved))
 	}
 	return nil
+}
+
+func normalizeRoots(roots []string, quiet bool) ([]string, error) {
+	for i := range roots {
+		rootDir := path.Clean(roots[i])
+		rootInfo, err := os.Stat(rootDir)
+		if err != nil {
+			return nil, err
+		}
+		if !rootInfo.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", rootDir)
+		}
+		roots[i] = rootDir
+	}
+
+	if len(roots) == 0 {
+		roots = []string{"."}
+	} else if len(roots) > 1 {
+		// Remove any root that is the same or a subdirectory of another.
+	outerLoop:
+		for i := 0; i < len(roots); {
+			for j := range roots {
+				if j == i {
+					continue
+				}
+				if strings.HasPrefix(roots[i], roots[j]) {
+					if !quiet {
+						fmt.Fprintln(os.Stderr, roots[i],
+							"already included in", roots[j])
+					}
+					// This root is a subdirectory of another, so skip it.
+					roots[i] = roots[len(roots)-1]
+					roots = roots[:len(roots)-1]
+					continue outerLoop
+				}
+			}
+			i++
+		}
+	}
+	return roots, nil
 }
 
 // sizeStr returns a string representation of the rounded bytes
@@ -292,7 +329,7 @@ func checkSame(filepaths []string) [][]string {
 
 // linkFiles links the files in the given list, which have been determined to
 // be identical.
-func linkFiles(files []string, rootDir string, link, symlink, absolute, safe, q bool) (int, int64) {
+func linkFiles(files []string, writeLinks, symlink, absolute, safe, verbose bool) (int, int64) {
 	if len(files) < 2 {
 		return 0, 0
 	}
@@ -307,20 +344,20 @@ func linkFiles(files []string, rootDir string, link, symlink, absolute, safe, q 
 	baseFile := files[0]
 	baseInfo, err := os.Stat(baseFile)
 	for err != nil {
+		// Skip files until one does not give error.
 		fmt.Fprintln(os.Stderr, err)
 		files = files[1:]
 		baseFile = files[0]
 		baseInfo, err = os.Stat(baseFile)
 	}
-	baseRel, err := filepath.Rel(rootDir, baseFile)
-	if err != nil {
-		baseRel = baseFile
-	}
 
 	for _, f := range files[1:] {
 		fInfo, err := os.Stat(f)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			if verbose {
+				fmt.Fprintln(os.Stderr, err)
+			}
+			// Cannot stat file, maybe removed, so skip.
 			continue
 		}
 		// If the files are already the same (hardlinked), then skip.
@@ -343,39 +380,36 @@ func linkFiles(files []string, rootDir string, link, symlink, absolute, safe, q 
 			}
 		}
 
-		if !link {
+		if !writeLinks {
 			sizeSaved += baseInfo.Size()
 			linkCount++
-			if !q {
-				tgtRel, err := filepath.Rel(rootDir, f)
-				if err != nil {
-					tgtRel = f
+			if verbose {
+				if symlink {
+					fmt.Println("symlink:", f, "<-->", baseFile)
+				} else {
+					fmt.Println("link:", f, "<-->", baseFile)
 				}
-				fmt.Println("link:", tgtRel, "<-->", baseRel)
 			}
 			continue
 		}
 
 		if err = os.Remove(f); err != nil {
-			fmt.Fprintln(os.Stderr, "cannot remove file:", f)
+			if verbose {
+				fmt.Fprintln(os.Stderr, "cannot remove file:", f)
+			}
 			continue
-		}
-
-		tgtRel, err := filepath.Rel(rootDir, f)
-		if err != nil {
-			tgtRel = f
 		}
 
 		createSymlink := symlink
 		if !symlink {
 			if err = os.Link(baseFile, f); err != nil {
 				createSymlink = true
-				if !q {
+				if verbose {
 					fmt.Fprintln(os.Stderr,
 						"could not create hardlink, creating symlink")
 				}
-			} else if !q {
-				fmt.Println("hardlink:", tgtRel, "<-->", baseRel)
+			} else if verbose {
+				fmt.Println("hardlink:", f, "<-->", baseFile)
 				if err = os.Chmod(f, baseInfo.Mode()); err != nil {
 					fmt.Fprintln(os.Stderr,
 						"failed to set mode on hardlink:", err)
@@ -390,7 +424,10 @@ func linkFiles(files []string, rootDir string, link, symlink, absolute, safe, q 
 			} else {
 				rp, err := filepath.Rel(path.Dir(baseFile), path.Dir(f))
 				if err != nil {
-					fmt.Fprintln(os.Stderr, err)
+					if verbose {
+						fmt.Fprintln(os.Stderr, err)
+					}
+					// Cannot make relative symlink.
 					source = baseFile
 				} else if rp == "." {
 					source = path.Base(baseFile)
@@ -401,16 +438,15 @@ func linkFiles(files []string, rootDir string, link, symlink, absolute, safe, q 
 
 			if err = os.Symlink(source, f); err != nil {
 				fmt.Fprintf(os.Stderr, "failed to create symlink for %s: %s",
-					baseRel, err)
+					baseFile, err)
 				// Restore file.
 				if err = copyFile(baseFile, f, fInfo.Mode()); err != nil {
 					fmt.Fprintln(os.Stderr, "failed to restore file:", err)
 				}
 				continue // skip stats update
-
-				if !q {
-					fmt.Println("symlink:", tgtRel, "--->", baseRel)
-				}
+			}
+			if verbose {
+				fmt.Println("symlink:", f, "--->", baseFile)
 			}
 		}
 		sizeSaved += baseInfo.Size()

@@ -12,7 +12,7 @@ import (
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage:")
-		fmt.Fprintln(os.Stderr, " ", path.Base(os.Args[0]), "[options] [root]")
+		fmt.Fprintln(os.Stderr, " ", path.Base(os.Args[0]), "[options] [root ..]")
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Options:")
 		flag.PrintDefaults()
@@ -25,25 +25,15 @@ func main() {
 		"Only link files identical to specified update file")
 	var pattern = flag.String("pattern", "",
 		"Only link files matching pattern")
-	var link = flag.Bool("w", false, "Write links to file system")
+	var writeLinks = flag.Bool("w", false, "Write links to file system")
 	var safe = flag.Bool("safe", false,
 		"Do not link files with different permissions or ownership")
 	var quiet = flag.Bool("q", false,
-		"Do not print individual link creation messages")
-	var veryQuiet = flag.Bool("qq", false, "Do not print results, implies -q")
+		"Quiet - suppress output messages and warnings")
+	var verbose = flag.Bool("v", false,
+		"Verbose - print individual link creation messages")
 	var help = flag.Bool("help", false, "Show help")
 	flag.Parse()
-
-	if flag.NArg() > 1 {
-		fmt.Fprintln(os.Stderr, "too many arguments given")
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	root := flag.Arg(0)
-	if root == "" {
-		root = "."
-	}
 
 	if *help {
 		fmt.Fprintln(os.Stderr, path.Base(os.Args[0]),
@@ -62,17 +52,17 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *veryQuiet {
-		flag.Set("q", "true")
+	if *quiet {
+		flag.Set("verbose", "false")
 	}
 
 	var err error
 	if *update != "" {
-		err = linksame.LinkSameUpdate(*update, root, *pattern, *link,
-			*symlink, *absolute, *safe, *quiet, *veryQuiet)
+		err = linksame.LinkSameUpdate(*update, flag.Args(), *pattern,
+			*writeLinks, *symlink, *absolute, *safe, *quiet, *verbose)
 	} else {
-		err = linksame.LinkSame(root, *pattern, *link, *symlink, *absolute,
-			*safe, *quiet, *veryQuiet)
+		err = linksame.LinkSame(flag.Args(), *pattern, *writeLinks, *symlink,
+			*absolute, *safe, *quiet, *verbose)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
