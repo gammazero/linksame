@@ -322,7 +322,7 @@ func createHashMap(fpaths []string) map[string][]string {
 		}
 		f1Info, err := os.Stat(fpaths[i])
 		if err != nil {
-			// Cannot stat file, maybe removed, so skip.
+			// Cannot stat file, so skip.
 			continue
 		}
 
@@ -333,14 +333,14 @@ func createHashMap(fpaths []string) map[string][]string {
 			continue
 		}
 
-		// Find hardlinks to current file, and resue hash for these.
+		// Find hardlinks to current file, and reuse hash for these.
 		for j := i + 1; j < len(fpaths); j++ {
 			if fpaths[j] == "" {
 				continue
 			}
 			f2Info, err := os.Stat(fpaths[j])
 			if err != nil {
-				// Cannot stat file, maybe removed, so mark as bad.
+				// Cannot stat file, so mark as bad.
 				fpaths[j] = ""
 				continue
 			}
