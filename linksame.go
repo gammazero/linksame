@@ -60,7 +60,7 @@ import (
 func LinkSame(roots []string, pattern string, writeLinks, symlink, absolute, safe, quiet, verbose bool) error {
 	roots, err := normalizeRoots(roots, quiet)
 	if err != nil {
-		return nil
+		return err
 	}
 	if !quiet {
 		fmt.Println("Linking identical files in", strings.Join(roots, ", "))
@@ -243,8 +243,10 @@ func normalizeRoots(roots []string, quiet bool) ([]string, error) {
 	}
 
 	if len(roots) == 0 {
-		roots = []string{"."}
-	} else if len(roots) > 1 {
+		return []string{"."}, nil
+	}
+
+	if len(roots) > 1 {
 		// Remove any root that is the same or a subdirectory of another.
 	outerLoop:
 		for i := 0; i < len(roots); {
@@ -415,12 +417,27 @@ func linkFiles(files []string, writeLinks, symlink, absolute, safe, verbose bool
 		if !writeLinks {
 			sizeSaved += baseInfo.Size()
 			linkCount++
-			if verbose {
-				if symlink {
-					fmt.Println("symlink:", f, "<-->", baseFile)
+			if !verbose {
+				continue
+			}
+			if symlink {
+				var source string
+				if absolute {
+					source = baseFile
 				} else {
-					fmt.Println("link:", f, "<-->", baseFile)
+					rp, err := filepath.Rel(path.Dir(f), path.Dir(baseFile))
+					if err != nil {
+						// Cannot make relative symlink.
+						source = baseFile
+					} else if rp == "." {
+						source = path.Base(baseFile)
+					} else {
+						source = path.Join(rp, path.Base(baseFile))
+					}
 				}
+				fmt.Println("symlink:", f, "--->", source)
+			} else {
+				fmt.Println("link:", f, "<-->", baseFile)
 			}
 			continue
 		}
@@ -454,7 +471,7 @@ func linkFiles(files []string, writeLinks, symlink, absolute, safe, verbose bool
 			if absolute {
 				source = baseFile
 			} else {
-				rp, err := filepath.Rel(path.Dir(baseFile), path.Dir(f))
+				rp, err := filepath.Rel(path.Dir(f), path.Dir(baseFile))
 				if err != nil {
 					if verbose {
 						fmt.Fprintln(os.Stderr, err)
@@ -478,7 +495,7 @@ func linkFiles(files []string, writeLinks, symlink, absolute, safe, verbose bool
 				continue // skip stats update
 			}
 			if verbose {
-				fmt.Println("symlink:", f, "--->", baseFile)
+				fmt.Println("symlink:", f, "--->", source)
 			}
 		}
 		sizeSaved += baseInfo.Size()
