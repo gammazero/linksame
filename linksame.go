@@ -32,7 +32,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -510,7 +509,7 @@ func copyFile(dst, src string, perm os.FileMode) error {
 		return err
 	}
 	defer in.Close()
-	tmp, err := ioutil.TempFile(filepath.Dir(dst), "")
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "")
 	if err != nil {
 		return err
 	}
